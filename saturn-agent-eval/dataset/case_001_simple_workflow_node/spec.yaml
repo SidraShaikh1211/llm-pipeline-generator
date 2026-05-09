@@ -1,0 +1,28 @@
+pipeline_name: foo_reports
+pipeline_domain: foo
+target_repo: saturn-pipelines-reports
+jira_ticket: TSYBSM-00001
+
+inputs:
+  - table: saturn.cdl_d_party
+    schema:
+      - { name: party_id, type: bigint }
+      - { name: party_name, type: string }
+
+outputs:
+  - table: foo_reports
+    exists: false
+    daily_volume_tier: 1
+    schema:
+      - { name: party_id, type: bigint }
+      - { name: report_code, type: string }
+      - { name: report_description, type: string }
+
+transformations: |
+  Read cdl_d_party, project (party_id, party_name) → (party_id, report_code, report_description).
+  report_code is constant "FOO_BO". report_description is constant "Foo Reports".
+
+args:
+  entity_code: foo
+  report_code: FOO_BO
+  report_description: Foo Reports

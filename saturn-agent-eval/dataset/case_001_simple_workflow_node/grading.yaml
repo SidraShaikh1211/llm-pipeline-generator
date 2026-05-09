@@ -1,0 +1,15 @@
+must_compile: true
+must_pass_convention_checks: true
+files_must_exist:
+  - FooNode.scala
+  - FooRocketProvider.scala
+provider:
+  must_call_finish: true
+  expected_node_ids: [foo_workflow]
+  expected_global_args: [lrdCode, reportingViewCode]
+  expected_node_arg_pairs:
+    - [reportCode, FOO_BO]
+    - [reportDescription, "Foo Reports"]
+test_pass_rate_minimum: 0.8
+ddl:
+  expected: false
