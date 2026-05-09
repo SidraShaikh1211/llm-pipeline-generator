@@ -1,8 +1,10 @@
 # Saturn Agent
 
-A hosted internal tool that turns a pipeline spec into a real PR against a Saturn repo.
-Plan → generate Scala/DDL/tests → validate → run tests → SUCCEEDED. PR is raised
-manually after the agent finishes.
+A hosted internal tool that turns a pipeline spec into generated Scala/DDL/tests
+in a per-job workspace. The agent's loop is plan → validate-DAG → generate →
+validate (compile + conventions) → run tests → **SUCCEEDED**. The loop ends
+there — PR creation is intentionally manual: open the workspace,
+`git commit && git push`, and raise the PR yourself.
 
 This repo is split into five packages:
 
@@ -215,7 +217,7 @@ Each case folder has its own `mock_responses.json`, so this works without API ke
 With the venv activated:
 
 ```sh
-# All four suites in one shot (~269 tests total)
+# All four suites in one shot (~305 tests total)
 pytest saturn-agent-worker/tests \
        saturn-agent-conventions/tests \
        saturn-agent-eval/tests \
@@ -225,7 +227,7 @@ pytest saturn-agent-worker/tests \
 Or run them individually:
 
 ```sh
-pytest saturn-agent-worker/tests        # ~225 tests
+pytest saturn-agent-worker/tests        # ~261 tests (unit + integration)
 pytest saturn-agent-conventions/tests   # ~18 tests
 pytest saturn-agent-eval/tests          # ~17 tests
 pytest saturn-agent-api/tests           # ~9 tests
@@ -236,16 +238,23 @@ pytest saturn-agent-api/tests           # ~9 tests
 ## What the agent does today
 
 ```
-INIT → PLANNING → GENERATING → VALIDATING → TESTING → SUCCEEDED
-                       ↑           ↓            ↓
-                       └── REPAIRING ←──────────┘
-                            (≤3 validation, ≤2 test attempts)
+INIT → PLANNING → OPTIMIZING_PLAN → GENERATING → VALIDATING → TESTING → SUCCEEDED
+                                         ↑           ↓            ↓
+                                         └── REPAIRING ←──────────┘
+                                              (≤3 validation, ≤2 test attempts)
 ```
 
-- Planner outputs a structured Plan (file list, descriptions, assumptions).
-- Generator writes each file via `write_file`. One LLM call per file (plus tool round-trips).
-- Validator runs `scalafmt`, `scalac`, and 5 text-based convention rules.
-- Test stage runs `sbt` for pure-Scala specs (devbox/SSH stubbed).
+- **Planner** outputs a structured Plan (file list with `depends_on`, descriptions, assumptions).
+- **Optimizing-plan pass** (deterministic, no LLM): validates the file DAG —
+  catches cycles, dangling deps, duplicate paths up-front — and topologically
+  sorts `plan.files` so upstream nodes are generated before their dependents.
+  Bad DAGs fail fast with a `dag.invalid` event instead of wasting LLM calls.
+- **Generator** writes each file via `write_file`. One LLM call per file (plus
+  tool round-trips). Already-generated upstream file bodies are appended to
+  the per-file user prompt so the LLM sees the actual contracts of its
+  dependencies, not just their plan descriptions.
+- **Validator** runs `scalafmt`, `scalac`, and 5 text-based convention rules.
+- **Test stage** runs `sbt` for pure-Scala specs (devbox/SSH stubbed).
 - On VALIDATING/TESTING failure, the agent loops back through REPAIRING.
 - Stops at SUCCEEDED. **PR creation is manual** — open the workspace,
   `git commit && git push`, raise the PR yourself.
