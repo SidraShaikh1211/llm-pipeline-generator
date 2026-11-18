@@ -1,4 +1,4 @@
-# Saturn Agent — Low-Level Design
+# LLM Pipeline Generator — Low-Level Design
 
 This document is the implementation plan. It is structured for Claude Code to read and execute against, repo by repo, module by module.
 
@@ -10,18 +10,18 @@ Conventions used in this doc:
 
 ---
 
-## 1. Repo: `saturn-agent-worker`
+## 1. Repo: `agent-worker`
 
 The single most important repo. Contains the orchestrator, agent, and all tools. Everything else exists to serve this.
 
 ### 1.1 Top-level layout
 
 ```
-saturn-agent-worker/
+agent-worker/
 ├── pyproject.toml
 ├── README.md
 ├── src/
-│   └── saturn_agent/
+│   └── agent_worker/
 │       ├── __init__.py
 │       ├── cli.py                    # entrypoint for local runs
 │       ├── config.py                 # pydantic settings
@@ -73,10 +73,10 @@ saturn-agent-worker/
 │   ├── unit/
 │   ├── integration/
 │   └── fixtures/
-├── skills/                           # ← copy of saturn-skills/ folder
-│   ├── saturn-pipeline-builder/SKILL.md
-│   ├── saturn-ddl-builder/SKILL.md
-│   ├── saturn-pipeline-tester/SKILL.md
+├── skills/                           # ← bundled skills folder
+│   ├── pipeline-builder/SKILL.md
+│   ├── ddl-builder/SKILL.md
+│   ├── pipeline-tester/SKILL.md
 │   └── references/
 ├── deployment/
 │   ├── Dockerfile
@@ -94,12 +94,12 @@ saturn-agent-worker/
 ### 1.2 `config.py` — settings
 
 ```python
-# src/saturn_agent/config.py
+# src/agent_worker/config.py
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SATURN_AGENT_", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="AGENT_WORKER_", env_file=".env")
 
     # LLM
     gemini_api_url: str
@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     minio_endpoint: str
     minio_access_key: SecretStr
     minio_secret_key: SecretStr
-    minio_bucket: str = "saturn-agent"
+    minio_bucket: str = "agent-artifacts"
 
     # Bitbucket
     bitbucket_base_url: str
@@ -142,7 +142,7 @@ All env-driven. No hardcoded paths or URLs anywhere else in the codebase.
 This is the heart of the deterministic side. Implementation is a small explicit FSM, not a workflow library.
 
 ```python
-# src/saturn_agent/orchestrator/state_machine.py
+# src/agent_worker/orchestrator/state_machine.py
 
 from enum import Enum
 from dataclasses import dataclass, field
@@ -226,7 +226,7 @@ Stage handlers (`stages.py`) are pure-ish: take `JobContext`, return next `Stage
 The output of the planning stage. This is what the rest of the orchestrator runs against.
 
 ```python
-# src/saturn_agent/orchestrator/plan.py
+# src/agent_worker/orchestrator/plan.py
 
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -263,7 +263,7 @@ class DDLPlan(BaseModel):
 class Plan(BaseModel):
     pipeline_name: str
     target_repo: str
-    skills_required: list[str]  # ["saturn-pipeline-builder", "saturn-ddl-builder", ...]
+    skills_required: list[str]  # ["pipeline-builder", "ddl-builder", ...]
     files: list[FilePlan]
     ddls: list[DDLPlan] = Field(default_factory=list)
     assumptions: list[str]  # generator-stated assumptions; surfaced in PR
@@ -278,7 +278,7 @@ The planner must produce this as JSON. Pydantic validates strictly. If the LLM r
 Single class. Wraps Gemini with the tool-calling loop.
 
 ```python
-# src/saturn_agent/agent/client.py
+# src/agent_worker/agent/client.py
 
 import google.generativeai as genai  # or whatever SDK your internal Gemini uses
 
@@ -308,7 +308,7 @@ class GenerateResult:
 ```
 
 ```python
-# src/saturn_agent/agent/tool_loop.py
+# src/agent_worker/agent/tool_loop.py
 
 class AgentToolLoop:
     """
@@ -364,7 +364,7 @@ Notes:
 Each tool is a class implementing this protocol:
 
 ```python
-# src/saturn_agent/tools/base.py
+# src/agent_worker/tools/base.py
 
 from typing import Protocol, Any
 from pydantic import BaseModel
@@ -404,7 +404,7 @@ Specific tools:
 | `write_file` | `emit.py` | Writes file to workspace; rejects writes outside workspace |
 | `scaffold_test_fixture` | `emit.py` | Creates a CSV fixture file under `src/test/resources/...` |
 | `scalafmt` | `validate.py` | Runs scalafmt; returns diff (or empty) |
-| `scalac` | `validate.py` | Compiles against saturn classpath; returns errors |
+| `scalac` | `validate.py` | Compiles against the target classpath; returns errors |
 | `convention_check` | `validate.py` | Static rules (see §1.7); returns list of violations |
 | `run_local_tests` | `test_local.py` | Runs `sbt testOnly *<spec>*` for non-Spark tests |
 | `run_devbox_tests` | `test_devbox.py` | SSHs to user devbox, runs Spark tests, streams output |
@@ -423,7 +423,7 @@ Each tool is independently unit-testable (inject `ToolContext`, mock subprocess 
 The biggest single quality lever. Static rules over generated Scala that don't need an LLM to verify:
 
 ```python
-# src/saturn_agent/tools/validate.py
+# src/agent_worker/tools/validate.py
 
 class ConventionViolation(BaseModel):
     rule: str
@@ -466,7 +466,7 @@ This file grows over time — every quality regression in eval becomes a new rul
 ### 1.8 Workspace manager
 
 ```python
-# src/saturn_agent/workspace/manager.py
+# src/agent_worker/workspace/manager.py
 
 class WorkspaceManager:
     def __init__(self, root: Path, repo_clone_service: "RepoCloneService"):
@@ -493,12 +493,12 @@ class WorkspaceManager:
         ...
 ```
 
-`RepoCloneService` is async-friendly and cached: if the worker has cloned `saturn-pipelines-reports` before, it does `git fetch + git reset --hard origin/<branch>` instead of a full clone.
+`RepoCloneService` is async-friendly and cached: if the worker has cloned `pipelines-reports` before, it does `git fetch + git reset --hard origin/<branch>` instead of a full clone.
 
 ### 1.9 Stage handlers (the meaty part)
 
 ```python
-# src/saturn_agent/orchestrator/stages.py
+# src/agent_worker/orchestrator/stages.py
 
 def stage_planning(ctx: JobContext, deps: OrchestratorDeps) -> Stage:
     agent = deps.agent_factory(allowed_tools=deps.tools.planning_set())
@@ -623,7 +623,7 @@ def stage_opening_pr(ctx: JobContext, deps: OrchestratorDeps) -> Stage:
 ### 1.10 Persistence schema
 
 ```sql
--- src/saturn_agent/persistence/migrations/001_initial.sql
+-- src/agent_worker/persistence/migrations/001_initial.sql
 
 CREATE TABLE users (
     id          UUID PRIMARY KEY,
@@ -680,7 +680,7 @@ CREATE TABLE audit_log (
 ### 1.11 CLI for local dev
 
 ```python
-# src/saturn_agent/cli.py
+# src/agent_worker/cli.py
 
 import click
 from pathlib import Path
@@ -702,7 +702,7 @@ def generate(spec: str, repo: str, devbox: str | None, no_pr: bool):
         user_id="local-dev",
         spec=spec_data,
         target_repo=repo,
-        workspace_path=tempfile.mkdtemp(prefix="saturn-agent-"),
+        workspace_path=tempfile.mkdtemp(prefix="agent-worker-"),
         devbox_host=devbox,
     )
     deps = build_deps_for_local()
@@ -725,15 +725,15 @@ This CLI is what you use during weeks of agent-quality iteration. The hosted ver
 
 ---
 
-## 2. Repo: `saturn-agent-conventions`
+## 2. Repo: `agent-conventions`
 
 Standalone offline tool. Runs as a cron in production; runs locally during development.
 
 ```
-saturn-agent-conventions/
+agent-conventions/
 ├── pyproject.toml
 ├── src/
-│   └── saturn_conventions/
+│   └── agent_conventions/
 │       ├── cli.py
 │       ├── parser.py        # tree-sitter-scala wrapper
 │       ├── extractors/
@@ -756,7 +756,7 @@ saturn-agent-conventions/
 ### 2.1 Output schema
 
 ```python
-# src/saturn_conventions/schemas/conventions.py
+# src/agent_conventions/schemas/conventions.py
 
 class ProviderConvention(BaseModel):
     name: str
@@ -784,7 +784,7 @@ class ParamConvention(BaseModel):
     name: str
     type: str
     naming: str  # "camelCase" | "snake_case"
-    annotation: str | None  # e.g., '@Reference("saturn", "cdl_d_party")'
+    annotation: str | None  # e.g., '@Reference("cdl", "cdl_d_party")'
 
 class DomainConvention(BaseModel):
     common_class_fields: list[tuple[str, str]]  # (field_name, type)
@@ -804,7 +804,7 @@ class RepoConventions(BaseModel):
     common_imports: list[str]  # imports seen in ≥80% of nodes — the "real" cheat-sheet
 ```
 
-This artifact is uploaded to MinIO at `s3://saturn-agent/conventions/<repo>/<timestamp>.json` and `s3://saturn-agent/conventions/<repo>/latest.json` (overwritten on each run).
+This artifact is uploaded to MinIO at `s3://agent-artifacts/conventions/<repo>/<timestamp>.json` and `s3://agent-artifacts/conventions/<repo>/latest.json` (overwritten on each run).
 
 ### 2.2 Parser approach
 
@@ -813,7 +813,7 @@ Use `tree-sitter-scala`. Build small extractors per construct type. Don't try to
 Example extractor:
 
 ```python
-# src/saturn_conventions/extractors/node.py
+# src/agent_conventions/extractors/node.py
 
 def extract_node_convention(file_path: Path, tree) -> NodeConvention:
     class_node = find_top_level_class(tree)
@@ -832,24 +832,24 @@ def extract_node_convention(file_path: Path, tree) -> NodeConvention:
 ### 2.3 CLI
 
 ```bash
-saturn-conventions extract --repo /path/to/saturn-pipelines-reports --out conventions.json
-saturn-conventions publish --repo saturn-pipelines-reports --json conventions.json
-saturn-conventions diff --repo saturn-pipelines-reports --against latest  # shows convention drift
+agent-conventions extract --repo /path/to/pipelines-reports --out conventions.json
+agent-conventions publish --repo pipelines-reports --json conventions.json
+agent-conventions diff --repo pipelines-reports --against latest  # shows convention drift
 ```
 
 The `diff` command is for code reviews when someone changes a pattern.
 
 ---
 
-## 3. Repo: `saturn-agent-eval`
+## 3. Repo: `agent-eval`
 
 Mirrors the worker's structure but for evaluation.
 
 ```
-saturn-agent-eval/
+agent-eval/
 ├── pyproject.toml
 ├── src/
-│   └── saturn_eval/
+│   └── agent_eval/
 │       ├── cli.py
 │       ├── runner.py        # invokes worker.cli per case
 │       ├── grader.py        # mechanical scoring
@@ -896,25 +896,25 @@ Grader runs each gate. Score = passed gates / total gates. Per-case score and ag
 ### 3.2 Run modes
 
 ```bash
-saturn-eval run --case case_001                      # one case, full output
-saturn-eval run --suite all --workers 4              # parallel
-saturn-eval baseline                                 # establish today's score
-saturn-eval compare --against last_baseline.json     # regression check
+agent-eval run --case case_001                      # one case, full output
+agent-eval run --suite all --workers 4              # parallel
+agent-eval baseline                                 # establish today's score
+agent-eval compare --against last_baseline.json     # regression check
 ```
 
-Wire `saturn-eval run --suite all` into the worker repo's CI. PR to `saturn-agent-worker` blocked if eval score regresses.
+Wire `agent-eval run --suite all` into the worker repo's CI. PR to `agent-worker` blocked if eval score regresses.
 
 ---
 
-## 4. Repo: `saturn-agent-api`
+## 4. Repo: `agent-api`
 
 FastAPI server. Thin: auth, request validation, job creation, SSE event stream, file serving from MinIO.
 
 ```
-saturn-agent-api/
+agent-api/
 ├── pyproject.toml
 ├── src/
-│   └── saturn_api/
+│   └── agent_api/
 │       ├── main.py
 │       ├── config.py
 │       ├── deps.py             # dependency-injection (db, redis, celery)
@@ -974,7 +974,7 @@ async def create_job(
         devbox_host=body.devbox_host or user.devbox_host,
     )
     # enqueue to celery
-    celery_app.send_task("saturn_agent.run_job", args=[str(job.id)])
+    celery_app.send_task("agent_worker.run_job", args=[str(job.id)])
     # audit
     AuditLogger(db).log(user_id=user.id, action="job.create",
                         resource=str(job.id), outcome="success")
@@ -1012,10 +1012,10 @@ async def stream_events(
 
 ---
 
-## 5. Repo: `saturn-agent-frontend`
+## 5. Repo: `agent-frontend`
 
 ```
-saturn-agent-frontend/
+agent-frontend/
 ├── package.json
 ├── vite.config.ts
 ├── tsconfig.json
@@ -1082,10 +1082,10 @@ If `stage = PAUSED_FOR_USER`, show the open_questions inline with answer fields.
 
 ### 6.1 Prompt versioning
 
-Every prompt template is a file in `saturn-agent-worker/prompts/`. Files are versioned: `planner_v3.md`, not `planner.md`. The active version is selected via config. Add new versions, A/B test against eval, switch when proven.
+Every prompt template is a file in `agent-worker/prompts/`. Files are versioned: `planner_v3.md`, not `planner.md`. The active version is selected via config. Add new versions, A/B test against eval, switch when proven.
 
 ```
-saturn-agent-worker/src/saturn_agent/agent/prompts/
+agent-worker/src/agent_worker/agent/prompts/
 ├── planner/
 │   ├── v1.md
 │   ├── v2.md
@@ -1103,7 +1103,7 @@ saturn-agent-worker/src/saturn_agent/agent/prompts/
 Hard limits per job, per stage, per LLM call:
 
 ```python
-# src/saturn_agent/agent/token_budget.py
+# src/agent_worker/agent/token_budget.py
 
 class TokenBudget:
     def __init__(self, max_total: int):
@@ -1182,18 +1182,18 @@ Never have config defaults that work in prod. Make accidental misconfiguration a
 
 This is what to hand to Claude Code, in order:
 
-1. **`saturn-agent-eval`**: dataset loader + grader + 5 stub cases (no real expected_files yet — just `must_compile: true`). Lets you measure anything you build.
-2. **`saturn-agent-conventions`**: extractor for one pipeline (`fbo_limits`), tree-sitter parser, JSON output. Test against the existing `saturn-pipelines-reports` repo.
-3. **`saturn-agent-worker` foundation**: config, persistence models (Alembic migrations), workspace manager, Gemini client (mockable), tool registry skeleton.
-4. **`saturn-agent-worker` tools — passive set**: `read_file`, `list_dir`, `grep`, `find_sibling`, `read_skill`, `read_reference`, `read_conventions`. Unit tests for each.
-5. **`saturn-agent-worker` tools — emit + validate**: `write_file`, `scalafmt`, `scalac`, `convention_check` (start with 5 rules, grow as eval surfaces issues).
-6. **`saturn-agent-worker` agent core**: `AgentToolLoop`, `prompt_builder`, `token_budget`. Integrate with Gemini.
-7. **`saturn-agent-worker` orchestrator + CLI**: state machine, stage handlers for plan + generate + validate + repair (no test, no PR yet). End-to-end from CLI.
+1. **`agent-eval`**: dataset loader + grader + 5 stub cases (no real expected_files yet — just `must_compile: true`). Lets you measure anything you build.
+2. **`agent-conventions`**: extractor for one pipeline (`fbo_limits`), tree-sitter parser, JSON output. Test against the existing `pipelines-reports` repo.
+3. **`agent-worker` foundation**: config, persistence models (Alembic migrations), workspace manager, Gemini client (mockable), tool registry skeleton.
+4. **`agent-worker` tools — passive set**: `read_file`, `list_dir`, `grep`, `find_sibling`, `read_skill`, `read_reference`, `read_conventions`. Unit tests for each.
+5. **`agent-worker` tools — emit + validate**: `write_file`, `scalafmt`, `scalac`, `convention_check` (start with 5 rules, grow as eval surfaces issues).
+6. **`agent-worker` agent core**: `AgentToolLoop`, `prompt_builder`, `token_budget`. Integrate with Gemini.
+7. **`agent-worker` orchestrator + CLI**: state machine, stage handlers for plan + generate + validate + repair (no test, no PR yet). End-to-end from CLI.
 8. **Iterate against eval**: run dataset, find gaps, add convention rules + reference content + prompt iterations until eval baseline is acceptable.
 9. **Tools — test execution**: `run_local_tests`, `run_devbox_tests`. Add testing stage to orchestrator.
 10. **Tools — VCS + PR**: `git_*`, `bitbucket_*`. Add committing + PR stages.
-11. **`saturn-agent-api`**: FastAPI server, Postgres + Celery, SSE event stream.
-12. **`saturn-agent-frontend`**: React UI, SpecForm, JobDetail.
+11. **`agent-api`**: FastAPI server, Postgres + Celery, SSE event stream.
+12. **`agent-frontend`**: React UI, SpecForm, JobDetail.
 13. **Observability everywhere**: prometheus metrics, OTLP traces, structured logging shipper.
 14. **Hardening**: SSO, audit log, secrets, rate limits, k8s manifests, runbooks.
 
@@ -1222,9 +1222,9 @@ So Claude Code doesn't accidentally build it:
 Concrete starting points:
 
 1. Initialize all five repos with `pyproject.toml` / `package.json`, ruff/mypy/eslint configs, basic CI (lint + test).
-2. In `saturn-agent-eval`, build the case loader and grader with 1 stub case. Verify `pytest` runs.
-3. In `saturn-agent-conventions`, install `tree-sitter` + `tree-sitter-scala`, parse one real `.scala` file from `saturn-pipelines-reports`, print the tree. Confirm the grammar covers what you need.
-4. In `saturn-agent-worker`, build `config.py` + `persistence/models.py` + Alembic init. Run `alembic upgrade head` against a local Postgres.
-5. In `saturn-agent-worker`, implement `read_file` and `list_dir` tools with full unit tests. These are the simplest tools and exercise the full `Tool` protocol.
+2. In `agent-eval`, build the case loader and grader with 1 stub case. Verify `pytest` runs.
+3. In `agent-conventions`, install `tree-sitter` + `tree-sitter-scala`, parse one real `.scala` file from `pipelines-reports`, print the tree. Confirm the grammar covers what you need.
+4. In `agent-worker`, build `config.py` + `persistence/models.py` + Alembic init. Run `alembic upgrade head` against a local Postgres.
+5. In `agent-worker`, implement `read_file` and `list_dir` tools with full unit tests. These are the simplest tools and exercise the full `Tool` protocol.
 
 If any of these takes more than a day, the design has a problem and we should adjust before building further.

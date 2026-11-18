@@ -1,4 +1,4 @@
-# Saturn Agent — unified venv requirements.
+# LLM Pipeline Generator — unified venv requirements.
 #
 # Installs every Python package in this repo as editable, with its [dev] extras
 # (pytest, ruff, mypy, …). One venv at the repo root drives everything:
@@ -7,10 +7,10 @@
 # Install with:
 #   pip install -r requirements.txt
 #
-# Order matters — saturn-agent-worker must be installed before the API,
+# Order matters — agent-worker must be installed before the API,
 # which imports from it directly.
 
--e ./saturn-agent-worker[dev]
--e ./saturn-agent-conventions[dev]
--e ./saturn-agent-eval[dev]
--e ./saturn-agent-api[dev]
+-e ./agent-worker[dev]
+-e ./agent-conventions[dev]
+-e ./agent-eval[dev]
+-e ./agent-api[dev]

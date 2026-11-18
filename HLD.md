@@ -1,8 +1,8 @@
-# Saturn Agent — High-Level Design
+# LLM Pipeline Generator — High-Level Design
 
 ## 1. Goals
 
-Build a hosted internal tool that takes a saturn pipeline spec, generates Scala code + DDL + tests, runs the tests, and opens a PR against the appropriate repo's `develop` branch — minimal manual work for the user beyond reviewing and approving.
+Build a hosted internal tool that takes a pipeline spec, generates Scala code + DDL + tests, runs the tests, and opens a PR against the appropriate repo's `develop` branch — minimal manual work for the user beyond reviewing and approving.
 
 Targets:
 - 5–30 internal users
@@ -99,8 +99,8 @@ The orchestrator is **dumb on purpose** — it's a finite state machine with exp
        │   └─────────────────────────────────────┘   │
        │                                             │
        │   Workspace: /workspace/<job_id>/           │
-       │     ├── repos/saturn-pipelines-reports/    │
-       │     ├── repos/saturn-hadoop-ddl/           │
+       │     ├── repos/pipelines-reports/    │
+       │     ├── repos/hadoop-ddl/           │
        │     └── outputs/                           │
        └────┬────────────────────────────┬───────────┘
             │                            │
@@ -124,7 +124,7 @@ The orchestrator is **dumb on purpose** — it's a finite state machine with exp
 ### Why these pieces
 
 - **Postgres for state, Redis for queue.** Postgres is the source of truth for job state, audit log, eval results. Redis is the message bus for job dispatch + transient SSE pub/sub. Don't conflate them.
-- **Celery, not RQ.** Celery has better support for chains/groups, retry policies with backoff, and result backends. Saturn jobs have natural sub-tasks (plan → generate → validate → test → PR) that benefit from chaining.
+- **Celery, not RQ.** Celery has better support for chains/groups, retry policies with backoff, and result backends. Generation jobs have natural sub-tasks (plan → generate → validate → test → PR) that benefit from chaining.
 - **Workers in k8s, tests on devbox.** Critical decision: the worker pod does all the lightweight work (LLM calls, file generation, scalac compile, simple unit tests). Anything that needs Spark/Hive is shelled out over SSH to the requesting user's devbox. This avoids putting Spark in the worker container and avoids licensing/access issues with shared cluster credentials.
 - **MinIO for artifacts.** S3-compatible on-prem object store. Stores generated files, agent transcripts, test outputs, eval traces.
 - **No Vault yet.** Secrets in Kubernetes Secrets for v1. Add Vault when secret rotation becomes a real concern (probably v2).
@@ -132,14 +132,14 @@ The orchestrator is **dumb on purpose** — it's a finite state machine with exp
 ## 5. The five repos (renamed for clarity)
 
 ```
-1. saturn-agent-frontend       — React app
-2. saturn-agent-api            — FastAPI server
-3. saturn-agent-worker         — Orchestrator + agent + tools
-4. saturn-agent-conventions    — Convention extractor (offline cron job)
-5. saturn-agent-eval           — Eval harness, dataset, scoring
+1. agent-frontend       — React app
+2. agent-api            — FastAPI server
+3. agent-worker         — Orchestrator + agent + tools
+4. agent-conventions    — Convention extractor (offline cron job)
+5. agent-eval           — Eval harness, dataset, scoring
 ```
 
-These are the agent project's own repos. The existing saturn repos (`saturn-pipelines-reports`, `saturn-hadoop-ddl`, etc.) are the **target** — read by the worker, not part of the agent codebase.
+These are the agent project's own repos. The existing pipeline repos (`pipelines-reports`, `hadoop-ddl`, etc.) are the **target** — read by the worker, not part of the agent codebase.
 
 Why split them: different deploy cadences, different review groups (frontend vs backend vs ML eng for eval), different test surfaces. Conventions extractor in particular runs offline and can deploy independently of everything else.
 
@@ -164,7 +164,7 @@ Why split them: different deploy cadences, different review groups (frontend vs 
 
 4. Orchestrator: PLANNING stage.
    Agent reads spec + conventions, decides:
-   - Which skills are needed (saturn-pipeline-builder always; ddl-builder
+   - Which skills are needed (pipeline-builder always; ddl-builder
      if output table is new; pipeline-tester for tests)
    - Decomposition: how many nodes, single-node vs multi-node DAG
    - List of files to be created, order of creation
@@ -229,7 +229,7 @@ Every failure persists the full state. User can resume from the UI, agent picks 
 - Workers run jobs sequentially (one job per worker pod). Horizontal scale = more pods.
 - No shared mutable state between jobs.
 
-Why fresh clones: avoids two concurrent jobs racing on the same checkout. Disk cost is negligible (saturn repos are < 500 MB). The performance cost of cloning is dwarfed by LLM call time.
+Why fresh clones: avoids two concurrent jobs racing on the same checkout. Disk cost is negligible (target repos are < 500 MB). The performance cost of cloning is dwarfed by LLM call time.
 
 **Devbox concurrency**: a user can have multiple jobs in flight, all targeting the same devbox. SSH commands are queued per-devbox by the worker (a Redis lock keyed on `devbox:<host>`) so two jobs don't fight over `sbt test` simultaneously.
 
@@ -256,13 +256,13 @@ Plus a per-job replay artifact in MinIO: full prompt + response transcript for e
 Runs offline (cron, daily) over each target repo:
 
 ```
-saturn-agent-conventions/
+agent-conventions/
   ├── extractor.py            # tree-sitter-based parser
   ├── schemas/
   │   └── conventions.schema.json
   └── output/
-      ├── saturn-pipelines-reports.conventions.json
-      └── saturn-hadoop-ddl.conventions.json
+      ├── pipelines-reports.conventions.json
+      └── hadoop-ddl.conventions.json
 ```
 
 Extracts per-pipeline:
@@ -285,7 +285,7 @@ This is the single biggest lever for code quality with weaker LLMs. Re-extractin
 Without this you cannot measure progress.
 
 ```
-saturn-agent-eval/
+agent-eval/
   ├── dataset/
   │   ├── case_001_simple_workflow_node/
   │   │   ├── spec.yaml             # input
@@ -297,16 +297,16 @@ saturn-agent-eval/
   └── grader.py                     # mechanical scoring
 ```
 
-Dataset: pick 8–12 real saturn PRs from git history. For each, the spec is the JIRA description + table schemas; the expected output is the actual merged code.
+Dataset: pick 8–12 real pipeline PRs from git history. For each, the spec is the JIRA description + table schemas; the expected output is the actual merged code.
 
 Grading axes (mechanical, no human judgment in v1):
-- **Compile** — does the generated code compile against saturn's classpath?
+- **Compile** — does the generated code compile against the target repo's classpath?
 - **Convention** — does it pass the static convention checks?
 - **Provider parity** — does the generated Provider chain have the same nodes and same edges as the ground truth (set equality, not identity)?
 - **DDL parity** — same columns, same partitioning?
 - **Test pass rate** — do the generated tests actually pass?
 
-Run the eval on every commit to `saturn-agent-worker`. Block merges that regress on the eval suite.
+Run the eval on every commit to `agent-worker`. Block merges that regress on the eval suite.
 
 Build this in week 1. **Without it you have no signal.**
 
@@ -328,7 +328,7 @@ In dependency order, not time order. Each layer assumes the previous works.
 
 1. **Eval harness + 5 dataset cases.** Without this you cannot measure quality of anything else.
 2. **Convention extractor MVP.** One pipeline parsed end-to-end into JSON. Becomes the load-bearing input for the agent.
-3. **Worker core: orchestrator + tool surface + Gemini client.** No queue, no API, no UI — just `python -m saturn_agent.cli generate --spec spec.yaml --repo /path` running locally on a dev machine. Iterate on quality against the eval suite.
+3. **Worker core: orchestrator + tool surface + Gemini client.** No queue, no API, no UI — just `python -m agent_worker.cli generate --spec spec.yaml --repo /path` running locally on a dev machine. Iterate on quality against the eval suite.
 4. **Tools: validation (scalac, scalafmt, convention_check).** Deterministic; biggest single quality lever after the conventions cache.
 5. **Tools: test execution (local-only first, devbox second).**
 6. **Tools: VCS + PR (git ops + Bitbucket API).**

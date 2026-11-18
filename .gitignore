@@ -21,7 +21,7 @@ dist/
 # Node / frontend
 node_modules/
 **/node_modules/
-saturn-agent-frontend/dist/
+agent-frontend/dist/
 *.tsbuildinfo
 
 # Eval / runtime outputs

@@ -1,4 +1,4 @@
-# Saturn Agent — Architecture & Deployment
+# LLM Pipeline Generator — Architecture & Deployment
 
 A plain-English overview of what the system does, how the pieces fit together,
 and how it would run on GCP in production.
@@ -10,7 +10,7 @@ and `LLD.md`.
 
 ## 1. What this system actually does
 
-Saturn Agent takes a short **pipeline spec** (input tables, output tables, the
+LLM Pipeline Generator takes a short **pipeline spec** (input tables, output tables, the
 transformation in plain English) and produces a **per-job workspace** with
 Scala source files, DDL, and tests — code that compiles, passes the firm's
 convention rules, and runs its own unit tests.
@@ -29,14 +29,14 @@ flowchart TB
 
     lb --> cdn[Cloud CDN]
     cdn --> gcs_static[(GCS bucket<br/>frontend bundle)]
-    lb --> api[Cloud Run Service<br/>saturn-api<br/>scales 1 → N]
+    lb --> api[Cloud Run Service<br/>agent-api<br/>scales 1 → N]
 
     api -->|read and write| sql[(Cloud SQL<br/>Postgres<br/>jobs, events, audit)]
     api -->|publish job_id| topic_pending[Pub-Sub topic<br/>jobs-pending]
     api -->|subscribe| topic_events[Pub-Sub topic<br/>jobs-events]
 
-    topic_pending -->|push| dispatcher[Dispatcher route<br/>inside saturn-api]
-    dispatcher -->|jobs.run| crj[Cloud Run Jobs<br/>saturn-worker<br/>1 execution per job]
+    topic_pending -->|push| dispatcher[Dispatcher route<br/>inside agent-api]
+    dispatcher -->|jobs.run| crj[Cloud Run Jobs<br/>agent-worker<br/>1 execution per job]
 
     crj -->|state and events| sql
     crj -->|publish events| topic_events
@@ -76,14 +76,14 @@ each:
 The story, in plain English:
 
 1. **User fills the form.** "Pipeline name `foo_reports`, target repo
-   `saturn-pipelines-reports`, here's the transformation in two sentences."
+   `pipelines-reports`, here's the transformation in two sentences."
 2. **Browser POSTs to the API.** API saves the job to Postgres and drops a
    `{job_id: "abc"}` message on the `jobs-pending` Pub/Sub topic. Returns
    `201 Created` instantly. User sees the new job in the list.
 3. **The browser navigates to the job page** and opens a streaming SSE
    connection so it can watch progress live.
 4. **Pub/Sub pushes the message** to a small "dispatcher" inside the API. The
-   dispatcher tells GCP "please start one execution of the `saturn-worker`
+   dispatcher tells GCP "please start one execution of the `agent-worker`
    Cloud Run Job, with `JOB_ID=abc` as an environment variable."
 5. **GCP launches a worker container.** It boots in ~5 seconds, reads the job
    from Postgres, and starts running through the stages.
@@ -105,11 +105,11 @@ That's it. The whole system is variations on this one flow.
 ```mermaid
 sequenceDiagram
     actor User as Browser
-    participant API as Cloud Run<br/>saturn-api
+    participant API as Cloud Run<br/>agent-api
     participant SQL as Cloud SQL
     participant PS_P as Pub-Sub jobs-pending
     participant PS_E as Pub-Sub jobs-events
-    participant Worker as Cloud Run Job saturn-worker
+    participant Worker as Cloud Run Job agent-worker
     participant LLM as Vertex AI or Anthropic
 
     User->>API: POST /api/jobs
@@ -271,7 +271,7 @@ journal. It never burns infinite tokens.
 
 ```mermaid
 flowchart LR
-    user(("Browser")) -->|GET /events/replay<br/>(once on page load)| api[saturn-api]
+    user(("Browser")) -->|GET /events/replay<br/>(once on page load)| api[agent-api]
     api -->|history from Postgres| user
     user -->|GET /events<br/>(SSE, held open)| api
     worker[Worker] -->|each event<br/>publishes| ps[Pub-Sub<br/>jobs-events]
@@ -415,7 +415,7 @@ debuggable**:
   orchestrator before any file is generated.
 - **Stage**: one step of the orchestrator (INIT, PLANNING, GENERATING, ...).
 - **Skill**: a long Markdown document describing how to write a particular
-  kind of Saturn artifact. Used as the system prompt during generation.
+  kind of pipeline artifact. Used as the system prompt during generation.
 - **Conventions slice**: a JSON file produced by the daily extractor,
   capturing the style and patterns of a specific target repo. Fed into the
   planner and generator prompts.
